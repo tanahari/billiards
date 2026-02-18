@@ -4,3 +4,14 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+# 物理演算
+rapier2d = "0.18.0"
+# 数学（Rapierと互換性のあるバージョンを指定）
+nalgebra = "0.32"
+
+# データ構造・通信
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# ユーティリティ
+rand = "0.8"
