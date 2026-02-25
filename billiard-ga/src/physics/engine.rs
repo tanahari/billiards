@@ -13,7 +13,7 @@ pub fn run_simulation(world: &mut PhysicsWorld, angle: f32, power: f32) {
 
     while ticks < max_ticks {
         // 物理計算を1ステップ進める (dt = 1/60s)
-        world.physics_pipeline.step(
+world.physics_pipeline.step(
             &world.gravity,
             &world.integration_parameters,
             &mut world.island_manager,
@@ -24,8 +24,9 @@ pub fn run_simulation(world: &mut PhysicsWorld, angle: f32, power: f32) {
             &mut world.impulse_joint_set,
             &mut world.multibody_joint_set,
             &mut world.ccd_solver,
-            None, // 物理イベントは手動でチェックするためNone
-            &(),   // フックなし
+            None,
+            &(),
+            &(), // ← この 13個目の引数を追加
         );
 
         // A. ポケット判定と球の削除

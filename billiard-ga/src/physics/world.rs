@@ -18,8 +18,8 @@ pub struct PhysicsWorld {
 impl PhysicsWorld {
     /// 新しい物理世界（ビリヤード台）を初期化する
     pub fn new() -> Self {
-        let mut rigid_body_set = RigidBodySet::new();
-        let mut collider_set = ColliderSet::new();
+        let rigid_body_set = RigidBodySet::new();
+        let collider_set = ColliderSet::new();
 
         // ビリヤードは真上から見下ろすため、重力はゼロ
         let integration_parameters = IntegrationParameters {
