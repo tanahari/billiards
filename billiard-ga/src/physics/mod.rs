@@ -94,7 +94,7 @@ fn evaluate_final_state(
     if is_success {
         let base_score = 1000.0;
         // 【修正】仕様書通りに × 3.0 を適用
-        let bonus = cos_theta * 100.0 * 3.0; 
+        let bonus = cos_theta * 100.0; 
         score = base_score + bonus;
     }
 
