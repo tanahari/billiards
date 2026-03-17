@@ -9,76 +9,96 @@ use crate::math::{calculate_aim_angle, is_shot_possible, calculate_cue_next_pos}
 use self::world::PhysicsWorld;
 use self::engine::run_simulation;
 
-/// GAから呼ばれる「3ショット一括シミュレーション」の窓口
-/// 3手分の入力を受け取り、一気にシミュレーションして最終的なスコアを返します。
-pub fn simulate_sequence(state: &TableState, inputs: &[ShotInput; 3]) -> ShotResult {
-    let ball_radius = 2.85;
-    let v0 = 5.0; 
-    let mu = 0.05;
+// --- 物理定数 ---
+const BALL_RADIUS: f32 = 2.85;
+const SHOT_POWER_V0: f32 = 5.0;
+const TABLE_FRICTION_MU: f32 = 0.05;
+const CUE_BALL_ID: u128 = 0;
 
-    // 現在の状態を追跡するための変数
-    let mut current_cue_pos = Point2::new(state.cue_ball_pos.0, state.cue_ball_pos.1);
+/// GAから呼ばれる「3ショット一括シミュレーション」
+pub fn simulate_sequence(state: &TableState, inputs: &[ShotInput; 3]) -> ShotResult {
+    // 1. 【宇宙の創生】この world が 3ショットの間、記憶を保持し続ける
+    let mut world = PhysicsWorld::new();
+    
     let mut total_base_score = 0.0;
     let mut success_count = 0;
-    let mut is_all_valid = true;
-    let mut final_is_scratch = false;
+    let mut is_valid = true;
+    let mut is_scratch = false;
+    
+    // 初期状態の手球位置
+    let mut last_cue_pos = Point2::new(state.cue_ball_pos.0, state.cue_ball_pos.1);
 
-    // 3回のショットを順番に実行
     for input in inputs {
-        // 1. 理論座標の取得（的球は本来 state から ID で取得しますが、ここではロジックを示します）
-        let target_ball_tuple = state.get_ball_pos(input.target_ball_id);
-        let target_ball_pos = Point2::new(target_ball_tuple.0, target_ball_tuple.1);
-        let target_pocket_pos = get_pocket_pos(input.target_pocket_id);
+        // ==========================================
+        // 2. 【現状観測】「今の宇宙」から真実の座標を抜き出す
+        // ==========================================
         
-        let other_balls: Vec<Point2<f32>> = state.get_all_ball_positions()
-            .into_iter().map(|(x, y)| Point2::new(x, y)).collect();
+        // 手球の現在位置をスキャン (なければスクラッチとして終了)
+        let Some(current_cue_pos) = get_ball_pos(&world, CUE_BALL_ID) else {
+            is_scratch = true;
+            break;
+        };
 
-        // 2. 【検証】打てるかどうかチェック
-        if !is_shot_possible(current_cue_pos, target_ball_pos, target_pocket_pos, ball_radius, &other_balls) {
-            is_all_valid = false;
-            break; // 打てない手があれば、その時点で連撃終了
+        // ターゲット球の現在位置をスキャン (なければGAの選択ミスとして終了)
+        let target_id_u128 = input.target_ball_id as u128;
+        let Some(target_ball_pos) = get_ball_pos(&world, target_id_u128) else {
+            is_valid = false;
+            break; 
+        };
+
+        // 障害物判定用：ターゲットと手球以外のすべての球の座標
+        let other_balls: Vec<Point2<f32>> = world.rigid_body_set.iter()
+            .filter_map(|(_, b)| {
+                let id = b.user_data;
+                if id != CUE_BALL_ID && id != target_id_u128 {
+                    Some(Point2::new(b.position().translation.x, b.position().translation.y))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let target_pocket_pos = get_pocket_pos(input.target_pocket_id);
+
+        // ==========================================
+        // 3. 【検閲・計算・実行】
+        // ==========================================
+        if !is_shot_possible(current_cue_pos, target_ball_pos, target_pocket_pos, BALL_RADIUS, &other_balls) {
+            is_valid = false;
+            break; 
         }
 
-        // 3. 角度とボーナス用 cosθ の計算
         let target_to_pocket = (target_pocket_pos - target_ball_pos).normalize();
-        let ghost_ball_pos = target_ball_pos - target_to_pocket * (ball_radius * 2.0);
+        let ghost_ball_pos = target_ball_pos - target_to_pocket * (BALL_RADIUS * 2.0);
         let cue_dir = (ghost_ball_pos - current_cue_pos).normalize();
         let cos_theta = cue_dir.dot(&target_to_pocket);
-        let aim_angle = calculate_aim_angle(current_cue_pos, target_ball_pos, target_pocket_pos, ball_radius);
+        let aim_angle = calculate_aim_angle(current_cue_pos, target_ball_pos, target_pocket_pos, BALL_RADIUS);
 
-        // 4. 【物理実行】
-        let mut world = PhysicsWorld::new();
-        run_simulation(&mut world, aim_angle, v0);
+        run_simulation(&mut world, aim_angle, SHOT_POWER_V0);
 
-        // 5. 【個別評価】
-        let shot_result = evaluate_single_shot(&world, input.target_ball_id, cos_theta, current_cue_pos, ghost_ball_pos, v0, mu);
+        // ==========================================
+        // 4. 【評価】
+        // ==========================================
+        let shot_result = evaluate_single_shot(&world, input.target_ball_id, cos_theta, current_cue_pos, ghost_ball_pos);
         
-        // スコアと成功数を積み上げ
         total_base_score += shot_result.score;
-        if shot_result.is_success {
-            success_count += 1;
+        if shot_result.is_success { 
+            success_count += 1; 
         }
-        
-        // 状態更新：手球の位置を次の開始地点へ
-        current_cue_pos = Point2::new(shot_result.end_cue_ball_pos.0, shot_result.end_cue_ball_pos.1);
+        last_cue_pos = Point2::new(shot_result.end_cue_ball_pos.0, shot_result.end_cue_ball_pos.1);
         
         if shot_result.is_scratch {
-            final_is_scratch = true;
-            break; // スクラッチしたら即終了
+            is_scratch = true;
+            break; 
         }
     }
 
-    // 6. 【最終スコア計算】成功数に応じた倍率を適用
-    // 3球入ったら×3、2球なら×2、1球なら×1
-    let multiplier = success_count as f32;
-    let final_score = total_base_score * multiplier;
-
     ShotResult {
         is_success: success_count == 3,
-        score: final_score,
-        end_cue_ball_pos: (current_cue_pos.x, current_cue_pos.y),
-        is_scratch: final_is_scratch,
-        is_valid: is_all_valid,
+        score: total_base_score * (success_count as f32),
+        end_cue_ball_pos: (last_cue_pos.x, last_cue_pos.y),
+        is_scratch,
+        is_valid,
     }
 }
 
@@ -89,37 +109,54 @@ fn evaluate_single_shot(
     cos_theta: f32,
     cue_start_pos: Point2<f32>,
     contact_pos: Point2<f32>,
-    v0: f32,
-    mu: f32
 ) -> ShotResult {
-    let target_id_u128 = target_id as u128;
-    let is_scratch = world.rigid_body_set.iter().find(|(_, body)| body.user_data == 0).is_none();
+    let is_scratch = get_ball_pos(world, CUE_BALL_ID).is_none();
 
     if is_scratch {
         return ShotResult {
-            is_success: false, score: 0.0, end_cue_ball_pos: (cue_start_pos.x, cue_start_pos.y),
-            is_scratch: true, is_valid: true,
+            is_success: false, 
+            score: 0.0, 
+            end_cue_ball_pos: (cue_start_pos.x, cue_start_pos.y),
+            is_scratch: true, 
+            is_valid: true,
         };
     }
 
-    let target_body = world.rigid_body_set.iter().find(|(_, body)| body.user_data == target_id_u128);
-    let is_success = target_body.is_none();
+    // ターゲット球が存在しなければポケットイン成功
+    let is_success = get_ball_pos(world, target_id as u128).is_none();
+    
+    let score = if is_success {
+        1000.0 + (cos_theta * 100.0) // 基礎点 + 精度ボーナス
+    } else {
+        0.0
+    };
 
-    let mut score = 0.0;
-    if is_success {
-        score = 1000.0 + (cos_theta * 100.0); // 基礎点 + 精度ボーナス
-    }
-
-    let end_cue_pos = calculate_cue_next_pos(cue_start_pos, contact_pos, v0, mu, 1.0);
+    let end_cue_pos = calculate_cue_next_pos(cue_start_pos, contact_pos, SHOT_POWER_V0, TABLE_FRICTION_MU, 1.0);
 
     ShotResult {
-        is_success, score, end_cue_ball_pos: (end_cue_pos.x, end_cue_pos.y),
-        is_scratch: false, is_valid: true,
+        is_success, 
+        score, 
+        end_cue_ball_pos: (end_cue_pos.x, end_cue_pos.y),
+        is_scratch: false, 
+        is_valid: true,
     }
 }
 
+// --- ヘルパー関数 ---
+
+/// 指定したIDの球の現在位置を抽出する
+fn get_ball_pos(world: &PhysicsWorld, ball_id: u128) -> Option<Point2<f32>> {
+    world.rigid_body_set.iter()
+        .find(|(_, body)| body.user_data == ball_id)
+        .map(|(_, body)| Point2::new(body.position().translation.x, body.position().translation.y))
+}
+
 fn get_pocket_pos(id: u8) -> Point2<f32> {
-    let positions = [(0.0, 0.0), (500.0, 0.0), (1000.0, 0.0), (0.0, 500.0), (500.0, 500.0), (1000.0, 500.0)];
-    let p = positions[(id as usize).min(5)];
+    const POSITIONS: [(f32, f32); 6] = [
+        (0.0, 0.0), (500.0, 0.0), (1000.0, 0.0), 
+        (0.0, 500.0), (500.0, 500.0), (1000.0, 500.0)
+    ];
+    // 安全に取得し、範囲外の場合は適当なフォールバック（ここでは6番目のポケット）を返す
+    let p = POSITIONS.get(id as usize).copied().unwrap_or(POSITIONS[5]);
     Point2::new(p.0, p.1)
 }
