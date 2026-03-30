@@ -6,8 +6,8 @@ pub mod engine;
 use nalgebra::Point2;
 use crate::model::{ShotInput, ShotResult, TableState};
 use crate::math::{calculate_aim_angle, is_shot_possible, calculate_cue_next_pos};
-use self::world::PhysicsWorld;
 use self::engine::run_simulation;
+use self::world::PhysicsWorld;
 
 // --- 物理定数 ---
 const BALL_RADIUS: f32 = 2.85;
@@ -16,37 +16,35 @@ const TABLE_FRICTION_MU: f32 = 0.05;
 const CUE_BALL_ID: u128 = 0;
 
 /// GAから呼ばれる「3ショット一括シミュレーション」
-pub fn simulate_sequence(state: &TableState, inputs: &[ShotInput; 3]) -> ShotResult {
-    // 1. 【宇宙の創生】この world が 3ショットの間、記憶を保持し続ける
-    let mut world = PhysicsWorld::new();
+pub fn simulate_sequence(initial_state: &TableState, inputs: &[ShotInput; 3]) -> ShotResult {
+    let mut current_state = initial_state.clone();
     
     let mut total_base_score = 0.0;
     let mut success_count = 0;
     let mut is_valid = true;
     let mut is_scratch = false;
     
-    // 初期状態の手球位置
-    let mut last_cue_pos = Point2::new(state.cue_ball_pos.0, state.cue_ball_pos.1);
+    let mut last_cue_pos = Point2::new(initial_state.cue_ball_pos.0, initial_state.cue_ball_pos.1);
 
     for input in inputs {
+        // 1. 【宇宙の創生】現在の状態からシミュレーション空間を構築
+        let mut world = PhysicsWorld::new(&current_state);
+
         // ==========================================
-        // 2. 【現状観測】「今の宇宙」から真実の座標を抜き出す
+        // 2. 【現状観測】
         // ==========================================
         
-        // 手球の現在位置をスキャン (なければスクラッチとして終了)
         let Some(current_cue_pos) = get_ball_pos(&world, CUE_BALL_ID) else {
             is_scratch = true;
             break;
         };
 
-        // ターゲット球の現在位置をスキャン (なければGAの選択ミスとして終了)
         let target_id_u128 = input.target_ball_id as u128;
         let Some(target_ball_pos) = get_ball_pos(&world, target_id_u128) else {
             is_valid = false;
             break; 
         };
 
-        // 障害物判定用：ターゲットと手球以外のすべての球の座標
         let other_balls: Vec<Point2<f32>> = world.rigid_body_set.iter()
             .filter_map(|(_, b)| {
                 let id = b.user_data;
@@ -91,11 +89,22 @@ pub fn simulate_sequence(state: &TableState, inputs: &[ShotInput; 3]) -> ShotRes
             is_scratch = true;
             break; 
         }
+
+        // 次のループのための状態更新
+        current_state = extract_state(&world);
     }
+
+    // 成功回数によるボーナス係数 (仕様に合わせて調整)
+    let multiplier = match success_count {
+        3 => 2.0,
+        2 => 1.5,
+        1 => 1.0,
+        _ => 0.0,
+    };
 
     ShotResult {
         is_success: success_count == 3,
-        score: total_base_score * (success_count as f32),
+        score: total_base_score * multiplier,
         end_cue_ball_pos: (last_cue_pos.x, last_cue_pos.y),
         is_scratch,
         is_valid,
@@ -122,11 +131,10 @@ fn evaluate_single_shot(
         };
     }
 
-    // ターゲット球が存在しなければポケットイン成功
     let is_success = get_ball_pos(world, target_id as u128).is_none();
     
     let score = if is_success {
-        1000.0 + (cos_theta * 100.0) // 基礎点 + 精度ボーナス
+        1000.0 + (cos_theta * 100.0) 
     } else {
         0.0
     };
@@ -144,7 +152,6 @@ fn evaluate_single_shot(
 
 // --- ヘルパー関数 ---
 
-/// 指定したIDの球の現在位置を抽出する
 fn get_ball_pos(world: &PhysicsWorld, ball_id: u128) -> Option<Point2<f32>> {
     world.rigid_body_set.iter()
         .find(|(_, body)| body.user_data == ball_id)
@@ -156,7 +163,27 @@ fn get_pocket_pos(id: u8) -> Point2<f32> {
         (0.0, 0.0), (500.0, 0.0), (1000.0, 0.0), 
         (0.0, 500.0), (500.0, 500.0), (1000.0, 500.0)
     ];
-    // 安全に取得し、範囲外の場合は適当なフォールバック（ここでは6番目のポケット）を返す
     let p = POSITIONS.get(id as usize).copied().unwrap_or(POSITIONS[5]);
     Point2::new(p.0, p.1)
+}
+
+/// 物理世界の現在状態からTableStateを抽出する
+fn extract_state(world: &PhysicsWorld) -> TableState {
+    let mut cue_ball_pos = (0.0, 0.0);
+    let mut remaining_balls = Vec::new();
+
+    for (_, body) in world.rigid_body_set.iter() {
+        let id = body.user_data as u8;
+        let pos = body.position().translation;
+        if id == 0 {
+            cue_ball_pos = (pos.x, pos.y);
+        } else {
+            remaining_balls.push((id, (pos.x, pos.y)));
+        }
+    }
+
+    TableState {
+        cue_ball_pos,
+        remaining_balls,
+    }
 }
